@@ -18,7 +18,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Environment variables with defaults
+# Environment variables
 USERNAME = os.environ.get('INSTAGRAM_USERNAME', '')
 PASSWORD = os.environ.get('INSTAGRAM_PASSWORD', '')
 TWO_FA_CODE = os.environ.get('INSTAGRAM_2FA_CODE', '')
@@ -59,7 +59,6 @@ def health():
 def login():
     """API endpoint to perform Instagram login"""
     try:
-        # Get credentials from request or environment
         username = USERNAME
         password = PASSWORD
         two_fa_code = TWO_FA_CODE
@@ -70,20 +69,18 @@ def login():
             password = data.get('password', PASSWORD)
             two_fa_code = data.get('two_fa_code', TWO_FA_CODE)
         
-        # Validate credentials
         if not username or not password:
             return jsonify({
                 "success": False,
-                "error": "Username and password are required. Set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD environment variables or provide in request."
+                "error": "Username and password are required"
             }), 400
         
         logger.info(f"Attempting login for user: {username}")
         
-        # Run the login
+        # Run the login with increased timeout
         result = asyncio.run(perform_login(username, password, two_fa_code))
         
         if result['success']:
-            logger.info(f"✅ Login successful for {username}")
             return jsonify({
                 "success": True,
                 "message": "Login successful",
@@ -91,13 +88,17 @@ def login():
                 "url": result.get('url', '')
             })
         else:
-            logger.error(f"❌ Login failed: {result.get('error', 'Unknown error')}")
             return jsonify({
                 "success": False,
                 "error": result.get('error', 'Login failed'),
                 "url": result.get('url', '')
             }), 400
             
+    except asyncio.TimeoutError:
+        return jsonify({
+            "success": False,
+            "error": "Login timed out. Instagram may be slow or have additional verification."
+        }), 408
     except Exception as e:
         logger.error(f"API error: {str(e)}")
         logger.error(traceback.format_exc())
@@ -118,8 +119,11 @@ async def perform_login(username, password, two_fa_code):
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
-                    '--disable-software-rasterizer'
-                ]
+                    '--disable-software-rasterizer',
+                    '--disable-extensions',
+                    '--disable-setuid-sandbox'
+                ],
+                timeout=30000  # 30 second timeout for browser launch
             )
             
             context = await browser.new_context(
@@ -131,14 +135,14 @@ async def perform_login(username, password, two_fa_code):
             
             try:
                 logger.info("Navigating to Instagram login page...")
-                await page.goto("https://www.instagram.com/accounts/login/", wait_until="networkidle")
+                await page.goto("https://www.instagram.com/accounts/login/", wait_until="networkidle", timeout=30000)
                 await asyncio.sleep(3)
                 
                 # Find and fill username
                 try:
-                    username_field = await page.wait_for_selector('input[name="email"]', timeout=10000)
+                    username_field = await page.wait_for_selector('input[name="email"]', timeout=15000)
                 except:
-                    username_field = await page.wait_for_selector('input[type="text"]', timeout=5000)
+                    username_field = await page.wait_for_selector('input[type="text"]', timeout=15000)
                 
                 if not username_field:
                     return {"success": False, "error": "Could not find username field"}
@@ -156,9 +160,9 @@ async def perform_login(username, password, two_fa_code):
                 
                 # Find and fill password
                 try:
-                    password_field = await page.wait_for_selector('input[name="password"]', timeout=5000)
+                    password_field = await page.wait_for_selector('input[name="password"]', timeout=15000)
                 except:
-                    password_field = await page.wait_for_selector('input[type="password"]', timeout=5000)
+                    password_field = await page.wait_for_selector('input[type="password"]', timeout=15000)
                 
                 if not password_field:
                     return {"success": False, "error": "Could not find password field"}
@@ -177,16 +181,16 @@ async def perform_login(username, password, two_fa_code):
                 # Press Enter to submit
                 await page.keyboard.press("Enter")
                 
-                # Wait for navigation
+                # Wait for navigation with longer timeout
                 try:
                     await page.wait_for_url(
                         lambda url: "two_step_verification" in url or "challenge" in url or ("instagram.com" in url and "login" not in url),
-                        timeout=15000
+                        timeout=30000
                     )
                 except:
                     pass
                 
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)
                 
                 current_url = page.url
                 
@@ -196,9 +200,8 @@ async def perform_login(username, password, two_fa_code):
                     
                     twofa_field = None
                     
-                    # Try to find 2FA input
                     try:
-                        twofa_field = await page.wait_for_selector('input[type="text"][autocomplete="off"]', timeout=5000)
+                        twofa_field = await page.wait_for_selector('input[type="text"][autocomplete="off"]', timeout=10000)
                     except:
                         pass
                     
@@ -241,12 +244,16 @@ async def perform_login(username, password, two_fa_code):
                         "url": final_url
                     }
                 else:
+                    # Take screenshot for debugging
+                    await page.screenshot(path="login_debug.png")
                     return {
                         "success": False,
                         "error": "Login failed - still on login page",
                         "url": final_url
                     }
                     
+            except asyncio.TimeoutError:
+                return {"success": False, "error": "Operation timed out"}
             except Exception as e:
                 logger.error(f"Login error: {str(e)}")
                 return {"success": False, "error": str(e)}
@@ -258,6 +265,6 @@ async def perform_login(username, password, two_fa_code):
         return {"success": False, "error": str(e)}
 
 if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 10000))
     logger.info(f"Starting server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
