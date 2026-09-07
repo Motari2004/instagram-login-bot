@@ -152,9 +152,9 @@ def run_login_background(username, password, two_fa_code):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        # Run the login
+        # Run the login with NO timeouts
         result = loop.run_until_complete(
-            perform_login(username, password, two_fa_code)
+            perform_login_no_timeout(username, password, two_fa_code)
         )
         
         login_status["completed"] = True
@@ -164,7 +164,6 @@ def run_login_background(username, password, two_fa_code):
         
         if result.get('success'):
             logger.info("✅ Background login successful!")
-            # Save cookies
             if result.get('cookies'):
                 with open('cookies.json', 'w') as f:
                     json.dump(result['cookies'], f, indent=2)
@@ -178,12 +177,12 @@ def run_login_background(username, password, two_fa_code):
         login_status["in_progress"] = False
         login_status["end_time"] = datetime.now().isoformat()
 
-async def perform_login(username, password, two_fa_code):
-    """Perform Instagram login with NO timeouts"""
+async def perform_login_no_timeout(username, password, two_fa_code):
+    """Perform Instagram login with ABSOLUTELY NO TIMEOUTS"""
     
     try:
         async with async_playwright() as p:
-            # Launch browser with NO timeout
+            # Launch browser with NO timeout parameters
             browser = await p.chromium.launch(
                 headless=True,
                 args=[
@@ -195,7 +194,6 @@ async def perform_login(username, password, two_fa_code):
                     '--disable-extensions',
                     '--disable-setuid-sandbox'
                 ]
-                # REMOVED timeout parameter
             )
             
             context = await browser.new_context(
@@ -207,60 +205,74 @@ async def perform_login(username, password, two_fa_code):
             
             try:
                 logger.info("Navigating to Instagram login page...")
-                # REMOVED timeout from goto
+                # NO TIMEOUT HERE
                 await page.goto("https://www.instagram.com/accounts/login/", wait_until="networkidle")
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)
                 
-                # Find and fill username
-                try:
-                    username_field = await page.wait_for_selector('input[name="email"]', timeout=30000)
-                except:
-                    username_field = await page.wait_for_selector('input[type="text"]', timeout=30000)
+                # Find username field - NO TIMEOUT, just wait indefinitely
+                logger.info("Waiting for username field...")
+                username_field = None
+                while username_field is None:
+                    try:
+                        username_field = await page.query_selector('input[name="email"]')
+                        if not username_field:
+                            username_field = await page.query_selector('input[type="text"]')
+                    except:
+                        pass
+                    if not username_field:
+                        logger.info("Waiting for username field...")
+                        await asyncio.sleep(2)
                 
-                if not username_field:
-                    return {"success": False, "error": "Could not find username field"}
-                
+                logger.info("Found username field!")
                 await username_field.click()
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
                 await username_field.fill("")
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(1)
                 
+                # Type username slowly
                 for char in username:
                     await username_field.type(char, delay=random.uniform(80, 180))
                     await asyncio.sleep(random.uniform(0.02, 0.08))
                 
-                await asyncio.sleep(random.uniform(0.5, 1.5))
+                await asyncio.sleep(2)
                 
-                # Find and fill password
-                try:
-                    password_field = await page.wait_for_selector('input[name="password"]', timeout=30000)
-                except:
-                    password_field = await page.wait_for_selector('input[type="password"]', timeout=30000)
+                # Find password field - NO TIMEOUT
+                logger.info("Waiting for password field...")
+                password_field = None
+                while password_field is None:
+                    try:
+                        password_field = await page.query_selector('input[name="password"]')
+                        if not password_field:
+                            password_field = await page.query_selector('input[type="password"]')
+                    except:
+                        pass
+                    if not password_field:
+                        logger.info("Waiting for password field...")
+                        await asyncio.sleep(2)
                 
-                if not password_field:
-                    return {"success": False, "error": "Could not find password field"}
-                
+                logger.info("Found password field!")
                 await password_field.click()
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
                 await password_field.fill("")
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(1)
                 
+                # Type password slowly
                 for char in password:
                     await password_field.type(char, delay=random.uniform(80, 180))
                     await asyncio.sleep(random.uniform(0.02, 0.08))
                 
-                await asyncio.sleep(random.uniform(0.5, 1.5))
+                await asyncio.sleep(2)
                 
                 # Press Enter to submit
                 logger.info("Pressing Enter to submit...")
                 await page.keyboard.press("Enter")
                 
-                # Wait for navigation - NO TIMEOUT
-                logger.info("Waiting for navigation (no timeout)...")
+                # Wait for navigation - NO TIMEOUT, just wait and check
+                logger.info("Waiting for page to respond...")
                 await asyncio.sleep(5)
                 
-                # Check URL repeatedly until it changes
-                max_checks = 30  # Check 30 times
+                # Keep checking URL until it changes
+                max_checks = 60  # Check up to 60 times (about 2 minutes)
                 for i in range(max_checks):
                     current_url = page.url
                     logger.info(f"Check {i+1}: Current URL: {current_url}")
@@ -275,7 +287,7 @@ async def perform_login(username, password, two_fa_code):
                     await asyncio.sleep(2)
                 
                 current_url = page.url
-                logger.info(f"Final URL after navigation check: {current_url}")
+                logger.info(f"URL after navigation: {current_url}")
                 
                 # Handle 2FA if needed
                 if "two_step_verification" in current_url.lower() or "challenge" in current_url.lower():
@@ -287,34 +299,44 @@ async def perform_login(username, password, two_fa_code):
                     twofa_field = None
                     
                     # Try multiple strategies to find 2FA input
-                    try:
-                        logger.info("Looking for 2FA input field...")
-                        inputs = await page.query_selector_all('input[type="text"]')
-                        for input_elem in inputs:
-                            is_visible = await input_elem.is_visible()
-                            if is_visible:
-                                name = await input_elem.get_attribute('name') or ''
-                                placeholder = await input_elem.get_attribute('placeholder') or ''
-                                aria_label = await input_elem.get_attribute('aria-label') or ''
-                                
-                                logger.info(f"Found input: name='{name}', placeholder='{placeholder}', aria-label='{aria_label}'")
-                                
-                                if name != "email" and "username" not in name.lower():
-                                    twofa_field = input_elem
-                                    logger.info(f"✅ Selected 2FA field: name='{name}'")
-                                    break
-                    except Exception as e:
-                        logger.error(f"Error finding 2FA input: {str(e)}")
+                    logger.info("Looking for 2FA input field...")
                     
-                    # If not found, try by placeholder
+                    # Strategy 1: Find by placeholder
+                    try:
+                        twofa_field = await page.query_selector('input[placeholder*="code" i], input[placeholder*="2FA" i]')
+                        if twofa_field:
+                            logger.info("✅ Found 2FA field by placeholder")
+                    except:
+                        pass
+                    
+                    # Strategy 2: Find any visible text input
                     if not twofa_field:
                         try:
-                            twofa_field = await page.wait_for_selector(
-                                'input[placeholder*="code" i], input[placeholder*="2FA" i]', 
-                                timeout=10000
-                            )
+                            inputs = await page.query_selector_all('input[type="text"]')
+                            for input_elem in inputs:
+                                is_visible = await input_elem.is_visible()
+                                if is_visible:
+                                    name = await input_elem.get_attribute('name') or ''
+                                    placeholder = await input_elem.get_attribute('placeholder') or ''
+                                    aria_label = await input_elem.get_attribute('aria-label') or ''
+                                    
+                                    logger.info(f"Found input: name='{name}', placeholder='{placeholder}'")
+                                    
+                                    if name != "email" and "username" not in name.lower():
+                                        twofa_field = input_elem
+                                        logger.info(f"✅ Selected 2FA field: name='{name}'")
+                                        break
+                        except Exception as e:
+                            logger.error(f"Error finding 2FA input: {str(e)}")
+                    
+                    # Strategy 3: Look for any input with autocomplete
+                    if not twofa_field:
+                        try:
+                            twofa_field = await page.query_selector('input[autocomplete="off"]')
                             if twofa_field:
-                                logger.info("✅ Found 2FA field by placeholder")
+                                name = await twofa_field.get_attribute('name')
+                                if name != "email":
+                                    logger.info("✅ Found 2FA field by autocomplete='off'")
                         except:
                             pass
                     
@@ -322,15 +344,15 @@ async def perform_login(username, password, two_fa_code):
                         logger.info(f"Filling 2FA code: {two_fa_code}")
                         
                         await twofa_field.click()
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(1)
                         await twofa_field.fill("")
-                        await asyncio.sleep(0.3)
+                        await asyncio.sleep(1)
                         
                         for char in two_fa_code:
                             await twofa_field.type(char, delay=random.uniform(80, 180))
                             await asyncio.sleep(random.uniform(0.02, 0.08))
                         
-                        await asyncio.sleep(1)
+                        await asyncio.sleep(2)
                         logger.info("Pressing Enter to submit 2FA...")
                         await page.keyboard.press("Enter")
                         
@@ -339,15 +361,28 @@ async def perform_login(username, password, two_fa_code):
                         await asyncio.sleep(5)
                         
                         # Check if 2FA worked
-                        for i in range(10):
+                        for i in range(20):
                             final_url = page.url
                             logger.info(f"2FA check {i+1}: {final_url}")
                             if "two_step" not in final_url and "challenge" not in final_url:
                                 logger.info("✅ 2FA completed!")
                                 break
-                            await asyncio.sleep(2)
+                            await asyncio.sleep(3)
                     else:
                         logger.warning("⚠️ 2FA field not found or no code provided")
+                        if not twofa_field:
+                            logger.error("Could not find 2FA input field!")
+                            # Log all inputs on page for debugging
+                            all_inputs = await page.query_selector_all('input')
+                            logger.info(f"Total inputs on page: {len(all_inputs)}")
+                            for i, inp in enumerate(all_inputs):
+                                try:
+                                    type_attr = await inp.get_attribute('type') or 'unknown'
+                                    name = await inp.get_attribute('name') or 'no-name'
+                                    placeholder = await inp.get_attribute('placeholder') or 'no-placeholder'
+                                    logger.info(f"  Input {i}: type='{type_attr}', name='{name}', placeholder='{placeholder}'")
+                                except:
+                                    pass
                 
                 # Final check
                 await asyncio.sleep(3)
@@ -371,7 +406,10 @@ async def perform_login(username, password, two_fa_code):
                     
             except Exception as e:
                 logger.error(f"Login error: {str(e)}")
-                await page.screenshot(path="login_error.png")
+                try:
+                    await page.screenshot(path="login_error.png")
+                except:
+                    pass
                 return {"success": False, "error": str(e)}
             finally:
                 await browser.close()
