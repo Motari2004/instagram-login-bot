@@ -35,8 +35,7 @@ login_status = {
     "completed": False,
     "result": None,
     "start_time": None,
-    "end_time": None,
-    "screenshots": []
+    "end_time": None
 }
 
 # Create screenshots directory
@@ -62,14 +61,32 @@ def get_screenshots():
     screenshots = []
     for filename in os.listdir('screenshots'):
         if filename.endswith('.png'):
-            with open(f'screenshots/{filename}', 'rb') as f:
-                img_data = base64.b64encode(f.read()).decode('utf-8')
-                screenshots.append({
-                    "name": filename,
-                    "data": f"data:image/png;base64,{img_data}"
-                })
+            try:
+                with open(f'screenshots/{filename}', 'rb') as f:
+                    img_data = base64.b64encode(f.read()).decode('utf-8')
+                    screenshots.append({
+                        "name": filename,
+                        "data": f"data:image/png;base64,{img_data}"
+                    })
+            except:
+                pass
+    
+    # Also return HTML content for debugging
+    html_files = []
+    for filename in os.listdir('screenshots'):
+        if filename.endswith('.html'):
+            try:
+                with open(f'screenshots/{filename}', 'r', encoding='utf-8') as f:
+                    html_files.append({
+                        "name": filename,
+                        "content": f.read()[:1000]  # First 1000 chars
+                    })
+            except:
+                pass
+    
     return jsonify({
         "screenshots": screenshots,
+        "html_files": html_files,
         "count": len(screenshots)
     })
 
@@ -135,7 +152,10 @@ def login():
     
     # Clear old screenshots
     for f in os.listdir('screenshots'):
-        os.remove(os.path.join('screenshots', f))
+        try:
+            os.remove(os.path.join('screenshots', f))
+        except:
+            pass
     
     login_status = {
         "in_progress": True,
@@ -171,7 +191,7 @@ def run_login_background(username, password, two_fa_code):
         asyncio.set_event_loop(loop)
         
         result = loop.run_until_complete(
-            perform_login_with_screenshots(username, password, two_fa_code)
+            perform_login_headless(username, password, two_fa_code)
         )
         
         login_status["completed"] = True
@@ -192,26 +212,48 @@ def run_login_background(username, password, two_fa_code):
 
 async def take_screenshot(page, name):
     """Take a screenshot and save it with timestamp"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"screenshots/{timestamp}_{name}.png"
-    await page.screenshot(path=filename, full_page=True)
-    logger.info(f"📸 Screenshot saved: {filename}")
-    return filename
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"screenshots/{timestamp}_{name}.png"
+        await page.screenshot(path=filename, full_page=True)
+        logger.info(f"📸 Screenshot saved: {filename}")
+        return filename
+    except Exception as e:
+        logger.error(f"Failed to take screenshot {name}: {str(e)}")
+        return None
 
-async def perform_login_with_screenshots(username, password, two_fa_code):
-    """Perform Instagram login with screenshots at every step"""
+async def save_html(page, name):
+    """Save HTML content for debugging"""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"screenshots/{timestamp}_{name}.html"
+        html = await page.content()
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(html)
+        logger.info(f"📄 HTML saved: {filename}")
+        return filename
+    except Exception as e:
+        logger.error(f"Failed to save HTML {name}: {str(e)}")
+        return None
+
+async def perform_login_headless(username, password, two_fa_code):
+    """Perform Instagram login in headless mode with screenshots"""
     
     try:
         async with async_playwright() as p:
-            # Launch browser with headless=False so you can see
+            # Use headless=True for Render
             browser = await p.chromium.launch(
-                headless=False,  # Show browser
+                headless=True,  # Must be True on Render
                 args=[
                     '--disable-blink-features=AutomationControlled',
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
-                    '--start-maximized'
+                    '--disable-software-rasterizer',
+                    '--disable-extensions',
+                    '--disable-setuid-sandbox',
+                    '--no-first-run',
+                    '--no-default-browser-check'
                 ]
             )
             
@@ -225,9 +267,10 @@ async def perform_login_with_screenshots(username, password, two_fa_code):
             try:
                 # Step 1: Go to Instagram
                 logger.info("📸 Step 1: Navigating to Instagram...")
-                await page.goto("https://www.instagram.com/", wait_until="networkidle")
+                await page.goto("https://www.instagram.com/", wait_until="networkidle", timeout=60000)
                 await asyncio.sleep(3)
                 await take_screenshot(page, "01_instagram_home")
+                await save_html(page, "01_instagram_home")
                 
                 current_url = page.url
                 logger.info(f"Current URL: {current_url}")
@@ -235,13 +278,15 @@ async def perform_login_with_screenshots(username, password, two_fa_code):
                 # Step 2: If not on login page, go to login
                 if "login" not in current_url:
                     logger.info("📸 Step 2: Going to login page...")
-                    await page.goto("https://www.instagram.com/accounts/login/")
+                    await page.goto("https://www.instagram.com/accounts/login/", timeout=60000)
                     await asyncio.sleep(3)
                     await take_screenshot(page, "02_login_page")
+                    await save_html(page, "02_login_page")
                 else:
                     await take_screenshot(page, "02_already_on_login")
+                    await save_html(page, "02_already_on_login")
                 
-                # Step 3: Check if we need to accept cookies
+                # Step 3: Check for cookie consent
                 logger.info("📸 Step 3: Checking for cookie consent...")
                 try:
                     cookie_button = await page.query_selector('button:has-text("Accept")')
@@ -270,7 +315,7 @@ async def perform_login_with_screenshots(username, password, two_fa_code):
                 for selector in selectors:
                     try:
                         logger.info(f"Trying selector: {selector}")
-                        username_field = await page.wait_for_selector(selector, timeout=3000)
+                        username_field = await page.wait_for_selector(selector, timeout=5000)
                         if username_field:
                             logger.info(f"✅ Found username field with: {selector}")
                             await take_screenshot(page, "04_username_field_found")
@@ -280,9 +325,7 @@ async def perform_login_with_screenshots(username, password, two_fa_code):
                 
                 if not username_field:
                     await take_screenshot(page, "04_username_field_not_found")
-                    html = await page.content()
-                    with open('screenshots/page_debug.html', 'w', encoding='utf-8') as f:
-                        f.write(html)
+                    await save_html(page, "04_username_field_not_found")
                     logger.error("❌ Could not find username field!")
                     return {"success": False, "error": "Could not find username field"}
                 
@@ -314,7 +357,7 @@ async def perform_login_with_screenshots(username, password, two_fa_code):
                 for selector in selectors:
                     try:
                         logger.info(f"Trying selector: {selector}")
-                        password_field = await page.wait_for_selector(selector, timeout=3000)
+                        password_field = await page.wait_for_selector(selector, timeout=5000)
                         if password_field:
                             logger.info(f"✅ Found password field with: {selector}")
                             await take_screenshot(page, "06_password_field_found")
@@ -324,6 +367,7 @@ async def perform_login_with_screenshots(username, password, two_fa_code):
                 
                 if not password_field:
                     await take_screenshot(page, "06_password_field_not_found")
+                    await save_html(page, "06_password_field_not_found")
                     logger.error("❌ Could not find password field!")
                     return {"success": False, "error": "Could not find password field"}
                 
@@ -345,37 +389,41 @@ async def perform_login_with_screenshots(username, password, two_fa_code):
                 # Step 8: Submit login
                 logger.info("📸 Step 8: Submitting login...")
                 await page.keyboard.press("Enter")
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)
                 await take_screenshot(page, "08_after_submit")
+                await save_html(page, "08_after_submit")
                 logger.info("✅ Login submitted")
                 
                 # Step 9: Wait for response
                 logger.info("📸 Step 9: Waiting for response...")
-                for i in range(10):
+                for i in range(15):
                     await asyncio.sleep(2)
                     current_url = page.url
                     logger.info(f"Check {i+1}: URL: {current_url}")
                     
                     if "two_step_verification" in current_url:
                         logger.info("🔐 2FA page detected!")
-                        await take_screenshot(page, f"09_2fa_detected_{i+1}")
+                        await take_screenshot(page, f"09_2fa_detected")
+                        await save_html(page, f"09_2fa_detected")
                         break
                     elif "login" not in current_url and "instagram.com" in current_url:
                         logger.info("✅ Navigated away from login!")
-                        await take_screenshot(page, f"09_logged_in_{i+1}")
+                        await take_screenshot(page, f"09_logged_in")
                         break
                     
-                    if i == 4:  # Take screenshot every few seconds
+                    if i % 3 == 0:  # Take screenshot every few seconds
                         await take_screenshot(page, f"09_waiting_{i+1}")
                 
                 current_url = page.url
                 logger.info(f"URL after waiting: {current_url}")
                 await take_screenshot(page, "09_final_url")
+                await save_html(page, "09_final_url")
                 
                 # Step 10: Handle 2FA if needed
                 if "two_step_verification" in current_url or "challenge" in current_url:
                     logger.info("📸 Step 10: Processing 2FA...")
                     await take_screenshot(page, "10_2fa_page")
+                    await save_html(page, "10_2fa_page")
                     
                     twofa_field = None
                     try:
@@ -415,20 +463,24 @@ async def perform_login_with_screenshots(username, password, two_fa_code):
                         await page.keyboard.press("Enter")
                         await asyncio.sleep(5)
                         await take_screenshot(page, "10_2fa_submitted")
+                        await save_html(page, "10_2fa_submitted")
                     else:
                         logger.warning("⚠️ 2FA field not found or no code provided")
                         await take_screenshot(page, "10_2fa_field_not_found")
+                        await save_html(page, "10_2fa_field_not_found")
                 
                 # Step 11: Final check
                 logger.info("📸 Step 11: Final check...")
                 await asyncio.sleep(3)
                 final_url = page.url
                 await take_screenshot(page, "11_final_page")
+                await save_html(page, "11_final_page")
                 
                 if "login" not in final_url and "challenge" not in final_url and "two_step" not in final_url:
                     cookies = await context.cookies()
                     logger.info("🎉 Login successful!")
                     await take_screenshot(page, "12_success")
+                    await save_html(page, "12_success")
                     return {
                         "success": True,
                         "cookies": cookies,
@@ -437,6 +489,7 @@ async def perform_login_with_screenshots(username, password, two_fa_code):
                 else:
                     logger.error(f"❌ Login failed. URL: {final_url}")
                     await take_screenshot(page, "12_failed")
+                    await save_html(page, "12_failed")
                     return {
                         "success": False,
                         "error": f"Login failed. URL: {final_url}",
@@ -446,11 +499,9 @@ async def perform_login_with_screenshots(username, password, two_fa_code):
             except Exception as e:
                 logger.error(f"Login error: {str(e)}")
                 await take_screenshot(page, "error")
+                await save_html(page, "error")
                 return {"success": False, "error": str(e)}
             finally:
-                # Keep browser open for 30 seconds to see result
-                logger.info("📸 Keeping browser open for 30 seconds...")
-                await asyncio.sleep(30)
                 await browser.close()
                 
     except Exception as e:
