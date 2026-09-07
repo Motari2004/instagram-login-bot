@@ -9,6 +9,7 @@ from flask import Flask, jsonify, request
 from datetime import datetime
 import traceback
 import threading
+import base64
 
 app = Flask(__name__)
 
@@ -34,8 +35,12 @@ login_status = {
     "completed": False,
     "result": None,
     "start_time": None,
-    "end_time": None
+    "end_time": None,
+    "screenshots": []
 }
+
+# Create screenshots directory
+os.makedirs('screenshots', exist_ok=True)
 
 @app.route('/')
 def home():
@@ -43,11 +48,29 @@ def home():
         "status": "online",
         "service": "Instagram Login Bot",
         "endpoints": {
-            "/login": "GET/POST - Start login process",
+            "/login": "POST - Start login process",
             "/status": "GET - Check login status",
             "/result": "GET - Get login result",
+            "/screenshots": "GET - Get all screenshots",
             "/health": "GET - Health check"
         }
+    })
+
+@app.route('/screenshots')
+def get_screenshots():
+    """Get all screenshots taken during login"""
+    screenshots = []
+    for filename in os.listdir('screenshots'):
+        if filename.endswith('.png'):
+            with open(f'screenshots/{filename}', 'rb') as f:
+                img_data = base64.b64encode(f.read()).decode('utf-8')
+                screenshots.append({
+                    "name": filename,
+                    "data": f"data:image/png;base64,{img_data}"
+                })
+    return jsonify({
+        "screenshots": screenshots,
+        "count": len(screenshots)
     })
 
 @app.route('/status')
@@ -62,12 +85,11 @@ def status():
             "start_time": login_status["start_time"],
             "end_time": login_status["end_time"]
         },
-        "message": "Use /login to start login, /result to get result"
+        "screenshot_count": len(os.listdir('screenshots'))
     })
 
 @app.route('/result')
 def get_result():
-    """Get the login result"""
     if login_status["completed"]:
         return jsonify(login_status["result"])
     else:
@@ -86,19 +108,15 @@ def health():
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    """Start the login process"""
     global login_status
     
-    # Check if login is already in progress
     if login_status["in_progress"]:
         return jsonify({
             "success": False,
             "message": "Login already in progress",
-            "status": "in_progress",
-            "start_time": login_status["start_time"]
+            "status": "in_progress"
         })
     
-    # Get credentials
     username = USERNAME
     password = PASSWORD
     two_fa_code = TWO_FA_CODE
@@ -115,7 +133,10 @@ def login():
             "error": "Username and password are required"
         }), 400
     
-    # Reset status
+    # Clear old screenshots
+    for f in os.listdir('screenshots'):
+        os.remove(os.path.join('screenshots', f))
+    
     login_status = {
         "in_progress": True,
         "completed": False,
@@ -124,7 +145,6 @@ def login():
         "end_time": None
     }
     
-    # Start login in background thread
     thread = threading.Thread(
         target=run_login_background,
         args=(username, password, two_fa_code)
@@ -136,25 +156,22 @@ def login():
         "success": True,
         "message": "Login started in background",
         "status": "in_progress",
-        "start_time": login_status["start_time"],
         "check_status": "/status",
-        "get_result": "/result"
+        "get_result": "/result",
+        "get_screenshots": "/screenshots"
     })
 
 def run_login_background(username, password, two_fa_code):
-    """Run login in background thread"""
     global login_status
     
     try:
         logger.info(f"Starting background login for: {username}")
         
-        # Create new event loop for this thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        # Run the login with NO timeouts
         result = loop.run_until_complete(
-            perform_login_no_timeout(username, password, two_fa_code)
+            perform_login_with_screenshots(username, password, two_fa_code)
         )
         
         login_status["completed"] = True
@@ -164,9 +181,6 @@ def run_login_background(username, password, two_fa_code):
         
         if result.get('success'):
             logger.info("✅ Background login successful!")
-            if result.get('cookies'):
-                with open('cookies.json', 'w') as f:
-                    json.dump(result['cookies'], f, indent=2)
         else:
             logger.error(f"❌ Background login failed: {result.get('error', 'Unknown error')}")
             
@@ -175,24 +189,29 @@ def run_login_background(username, password, two_fa_code):
         login_status["completed"] = True
         login_status["result"] = {"success": False, "error": str(e)}
         login_status["in_progress"] = False
-        login_status["end_time"] = datetime.now().isoformat()
 
-async def perform_login_no_timeout(username, password, two_fa_code):
-    """Perform Instagram login with ABSOLUTELY NO TIMEOUTS"""
+async def take_screenshot(page, name):
+    """Take a screenshot and save it with timestamp"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"screenshots/{timestamp}_{name}.png"
+    await page.screenshot(path=filename, full_page=True)
+    logger.info(f"📸 Screenshot saved: {filename}")
+    return filename
+
+async def perform_login_with_screenshots(username, password, two_fa_code):
+    """Perform Instagram login with screenshots at every step"""
     
     try:
         async with async_playwright() as p:
-            # Launch browser with NO timeout parameters
+            # Launch browser with headless=False so you can see
             browser = await p.chromium.launch(
-                headless=True,
+                headless=False,  # Show browser
                 args=[
                     '--disable-blink-features=AutomationControlled',
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
-                    '--disable-software-rasterizer',
-                    '--disable-extensions',
-                    '--disable-setuid-sandbox'
+                    '--start-maximized'
                 ]
             )
             
@@ -204,145 +223,182 @@ async def perform_login_no_timeout(username, password, two_fa_code):
             page = await context.new_page()
             
             try:
-                logger.info("Navigating to Instagram login page...")
-                # NO TIMEOUT HERE
-                await page.goto("https://www.instagram.com/accounts/login/", wait_until="networkidle")
-                await asyncio.sleep(5)
+                # Step 1: Go to Instagram
+                logger.info("📸 Step 1: Navigating to Instagram...")
+                await page.goto("https://www.instagram.com/", wait_until="networkidle")
+                await asyncio.sleep(3)
+                await take_screenshot(page, "01_instagram_home")
                 
-                # Find username field - NO TIMEOUT, just wait indefinitely
-                logger.info("Waiting for username field...")
+                current_url = page.url
+                logger.info(f"Current URL: {current_url}")
+                
+                # Step 2: If not on login page, go to login
+                if "login" not in current_url:
+                    logger.info("📸 Step 2: Going to login page...")
+                    await page.goto("https://www.instagram.com/accounts/login/")
+                    await asyncio.sleep(3)
+                    await take_screenshot(page, "02_login_page")
+                else:
+                    await take_screenshot(page, "02_already_on_login")
+                
+                # Step 3: Check if we need to accept cookies
+                logger.info("📸 Step 3: Checking for cookie consent...")
+                try:
+                    cookie_button = await page.query_selector('button:has-text("Accept")')
+                    if cookie_button:
+                        await cookie_button.click()
+                        await asyncio.sleep(1)
+                        await take_screenshot(page, "03_cookies_accepted")
+                        logger.info("✅ Accepted cookies")
+                except:
+                    logger.info("No cookie consent needed")
+                    await take_screenshot(page, "03_no_cookies")
+                
+                # Step 4: Find username field
+                logger.info("📸 Step 4: Looking for username field...")
                 username_field = None
-                while username_field is None:
+                
+                selectors = [
+                    'input[name="email"]',
+                    'input[type="text"]',
+                    'input[autocomplete="username"]',
+                    'input[placeholder*="Phone"]',
+                    'input[placeholder*="Username"]',
+                    'input[placeholder*="Email"]'
+                ]
+                
+                for selector in selectors:
                     try:
-                        username_field = await page.query_selector('input[name="email"]')
-                        if not username_field:
-                            username_field = await page.query_selector('input[type="text"]')
+                        logger.info(f"Trying selector: {selector}")
+                        username_field = await page.wait_for_selector(selector, timeout=3000)
+                        if username_field:
+                            logger.info(f"✅ Found username field with: {selector}")
+                            await take_screenshot(page, "04_username_field_found")
+                            break
                     except:
                         pass
-                    if not username_field:
-                        logger.info("Waiting for username field...")
-                        await asyncio.sleep(2)
                 
-                logger.info("Found username field!")
+                if not username_field:
+                    await take_screenshot(page, "04_username_field_not_found")
+                    html = await page.content()
+                    with open('screenshots/page_debug.html', 'w', encoding='utf-8') as f:
+                        f.write(html)
+                    logger.error("❌ Could not find username field!")
+                    return {"success": False, "error": "Could not find username field"}
+                
+                # Step 5: Fill username
+                logger.info("📸 Step 5: Filling username...")
                 await username_field.click()
                 await asyncio.sleep(1)
                 await username_field.fill("")
                 await asyncio.sleep(1)
                 
-                # Type username slowly
                 for char in username:
                     await username_field.type(char, delay=random.uniform(80, 180))
                     await asyncio.sleep(random.uniform(0.02, 0.08))
                 
                 await asyncio.sleep(2)
+                await take_screenshot(page, "05_username_filled")
+                logger.info(f"✅ Username filled: {username}")
                 
-                # Find password field - NO TIMEOUT
-                logger.info("Waiting for password field...")
+                # Step 6: Find password field
+                logger.info("📸 Step 6: Looking for password field...")
                 password_field = None
-                while password_field is None:
+                
+                selectors = [
+                    'input[name="password"]',
+                    'input[type="password"]',
+                    'input[autocomplete="current-password"]'
+                ]
+                
+                for selector in selectors:
                     try:
-                        password_field = await page.query_selector('input[name="password"]')
-                        if not password_field:
-                            password_field = await page.query_selector('input[type="password"]')
+                        logger.info(f"Trying selector: {selector}")
+                        password_field = await page.wait_for_selector(selector, timeout=3000)
+                        if password_field:
+                            logger.info(f"✅ Found password field with: {selector}")
+                            await take_screenshot(page, "06_password_field_found")
+                            break
                     except:
                         pass
-                    if not password_field:
-                        logger.info("Waiting for password field...")
-                        await asyncio.sleep(2)
                 
-                logger.info("Found password field!")
+                if not password_field:
+                    await take_screenshot(page, "06_password_field_not_found")
+                    logger.error("❌ Could not find password field!")
+                    return {"success": False, "error": "Could not find password field"}
+                
+                # Step 7: Fill password
+                logger.info("📸 Step 7: Filling password...")
                 await password_field.click()
                 await asyncio.sleep(1)
                 await password_field.fill("")
                 await asyncio.sleep(1)
                 
-                # Type password slowly
                 for char in password:
                     await password_field.type(char, delay=random.uniform(80, 180))
                     await asyncio.sleep(random.uniform(0.02, 0.08))
                 
                 await asyncio.sleep(2)
+                await take_screenshot(page, "07_password_filled")
+                logger.info("✅ Password filled")
                 
-                # Press Enter to submit
-                logger.info("Pressing Enter to submit...")
+                # Step 8: Submit login
+                logger.info("📸 Step 8: Submitting login...")
                 await page.keyboard.press("Enter")
+                await asyncio.sleep(3)
+                await take_screenshot(page, "08_after_submit")
+                logger.info("✅ Login submitted")
                 
-                # Wait for navigation - NO TIMEOUT, just wait and check
-                logger.info("Waiting for page to respond...")
-                await asyncio.sleep(5)
-                
-                # Keep checking URL until it changes
-                max_checks = 60  # Check up to 60 times (about 2 minutes)
-                for i in range(max_checks):
-                    current_url = page.url
-                    logger.info(f"Check {i+1}: Current URL: {current_url}")
-                    
-                    if "two_step_verification" in current_url.lower() or "challenge" in current_url.lower():
-                        logger.info("🔐 2FA page detected!")
-                        break
-                    elif "login" not in current_url.lower():
-                        logger.info("✅ Navigated away from login page!")
-                        break
-                    
+                # Step 9: Wait for response
+                logger.info("📸 Step 9: Waiting for response...")
+                for i in range(10):
                     await asyncio.sleep(2)
+                    current_url = page.url
+                    logger.info(f"Check {i+1}: URL: {current_url}")
+                    
+                    if "two_step_verification" in current_url:
+                        logger.info("🔐 2FA page detected!")
+                        await take_screenshot(page, f"09_2fa_detected_{i+1}")
+                        break
+                    elif "login" not in current_url and "instagram.com" in current_url:
+                        logger.info("✅ Navigated away from login!")
+                        await take_screenshot(page, f"09_logged_in_{i+1}")
+                        break
+                    
+                    if i == 4:  # Take screenshot every few seconds
+                        await take_screenshot(page, f"09_waiting_{i+1}")
                 
                 current_url = page.url
-                logger.info(f"URL after navigation: {current_url}")
+                logger.info(f"URL after waiting: {current_url}")
+                await take_screenshot(page, "09_final_url")
                 
-                # Handle 2FA if needed
-                if "two_step_verification" in current_url.lower() or "challenge" in current_url.lower():
-                    logger.info("🔐 Processing 2FA...")
-                    
-                    # Wait for 2FA input - NO TIMEOUT
-                    await asyncio.sleep(3)
+                # Step 10: Handle 2FA if needed
+                if "two_step_verification" in current_url or "challenge" in current_url:
+                    logger.info("📸 Step 10: Processing 2FA...")
+                    await take_screenshot(page, "10_2fa_page")
                     
                     twofa_field = None
-                    
-                    # Try multiple strategies to find 2FA input
-                    logger.info("Looking for 2FA input field...")
-                    
-                    # Strategy 1: Find by placeholder
                     try:
-                        twofa_field = await page.query_selector('input[placeholder*="code" i], input[placeholder*="2FA" i]')
-                        if twofa_field:
-                            logger.info("✅ Found 2FA field by placeholder")
+                        twofa_field = await page.wait_for_selector('input[type="text"]', timeout=5000)
                     except:
                         pass
                     
-                    # Strategy 2: Find any visible text input
                     if not twofa_field:
                         try:
-                            inputs = await page.query_selector_all('input[type="text"]')
-                            for input_elem in inputs:
-                                is_visible = await input_elem.is_visible()
+                            inputs = await page.query_selector_all('input')
+                            for inp in inputs:
+                                is_visible = await inp.is_visible()
                                 if is_visible:
-                                    name = await input_elem.get_attribute('name') or ''
-                                    placeholder = await input_elem.get_attribute('placeholder') or ''
-                                    aria_label = await input_elem.get_attribute('aria-label') or ''
-                                    
-                                    logger.info(f"Found input: name='{name}', placeholder='{placeholder}'")
-                                    
-                                    if name != "email" and "username" not in name.lower():
-                                        twofa_field = input_elem
-                                        logger.info(f"✅ Selected 2FA field: name='{name}'")
+                                    type_attr = await inp.get_attribute('type')
+                                    if type_attr == 'text' or type_attr == 'number':
+                                        twofa_field = inp
+                                        logger.info("✅ Found 2FA field by scanning all inputs")
                                         break
-                        except Exception as e:
-                            logger.error(f"Error finding 2FA input: {str(e)}")
-                    
-                    # Strategy 3: Look for any input with autocomplete
-                    if not twofa_field:
-                        try:
-                            twofa_field = await page.query_selector('input[autocomplete="off"]')
-                            if twofa_field:
-                                name = await twofa_field.get_attribute('name')
-                                if name != "email":
-                                    logger.info("✅ Found 2FA field by autocomplete='off'")
                         except:
                             pass
                     
                     if twofa_field and two_fa_code:
-                        logger.info(f"Filling 2FA code: {two_fa_code}")
-                        
+                        logger.info(f"📸 Filling 2FA code: {two_fa_code}")
                         await twofa_field.click()
                         await asyncio.sleep(1)
                         await twofa_field.fill("")
@@ -353,65 +409,48 @@ async def perform_login_no_timeout(username, password, two_fa_code):
                             await asyncio.sleep(random.uniform(0.02, 0.08))
                         
                         await asyncio.sleep(2)
+                        await take_screenshot(page, "10_2fa_filled")
+                        
                         logger.info("Pressing Enter to submit 2FA...")
                         await page.keyboard.press("Enter")
-                        
-                        # Wait for 2FA to process - NO TIMEOUT
-                        logger.info("Waiting for 2FA verification...")
                         await asyncio.sleep(5)
-                        
-                        # Check if 2FA worked
-                        for i in range(20):
-                            final_url = page.url
-                            logger.info(f"2FA check {i+1}: {final_url}")
-                            if "two_step" not in final_url and "challenge" not in final_url:
-                                logger.info("✅ 2FA completed!")
-                                break
-                            await asyncio.sleep(3)
+                        await take_screenshot(page, "10_2fa_submitted")
                     else:
                         logger.warning("⚠️ 2FA field not found or no code provided")
-                        if not twofa_field:
-                            logger.error("Could not find 2FA input field!")
-                            # Log all inputs on page for debugging
-                            all_inputs = await page.query_selector_all('input')
-                            logger.info(f"Total inputs on page: {len(all_inputs)}")
-                            for i, inp in enumerate(all_inputs):
-                                try:
-                                    type_attr = await inp.get_attribute('type') or 'unknown'
-                                    name = await inp.get_attribute('name') or 'no-name'
-                                    placeholder = await inp.get_attribute('placeholder') or 'no-placeholder'
-                                    logger.info(f"  Input {i}: type='{type_attr}', name='{name}', placeholder='{placeholder}'")
-                                except:
-                                    pass
+                        await take_screenshot(page, "10_2fa_field_not_found")
                 
-                # Final check
+                # Step 11: Final check
+                logger.info("📸 Step 11: Final check...")
                 await asyncio.sleep(3)
                 final_url = page.url
-                logger.info(f"Final URL: {final_url}")
+                await take_screenshot(page, "11_final_page")
                 
                 if "login" not in final_url and "challenge" not in final_url and "two_step" not in final_url:
                     cookies = await context.cookies()
+                    logger.info("🎉 Login successful!")
+                    await take_screenshot(page, "12_success")
                     return {
                         "success": True,
                         "cookies": cookies,
                         "url": final_url
                     }
                 else:
-                    await page.screenshot(path="login_failed.png")
+                    logger.error(f"❌ Login failed. URL: {final_url}")
+                    await take_screenshot(page, "12_failed")
                     return {
                         "success": False,
-                        "error": "Login failed - still on login page",
+                        "error": f"Login failed. URL: {final_url}",
                         "url": final_url
                     }
                     
             except Exception as e:
                 logger.error(f"Login error: {str(e)}")
-                try:
-                    await page.screenshot(path="login_error.png")
-                except:
-                    pass
+                await take_screenshot(page, "error")
                 return {"success": False, "error": str(e)}
             finally:
+                # Keep browser open for 30 seconds to see result
+                logger.info("📸 Keeping browser open for 30 seconds...")
+                await asyncio.sleep(30)
                 await browser.close()
                 
     except Exception as e:
