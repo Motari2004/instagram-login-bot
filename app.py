@@ -5,7 +5,7 @@ import random
 import json
 import time
 import os
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file, render_template_string
 from datetime import datetime
 import traceback
 import threading
@@ -21,9 +21,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Environment variables
-USERNAME = os.environ.get('INSTAGRAM_USERNAME', '')
-PASSWORD = os.environ.get('INSTAGRAM_PASSWORD', '')
-TWO_FA_CODE = os.environ.get('INSTAGRAM_2FA_CODE', '')
+USERNAME = os.environ.get('INSTAGRAM_USERNAME', 'hopefreymosingi')
+PASSWORD = os.environ.get('INSTAGRAM_PASSWORD', 'automationmaster')
+TWO_FA_CODE = os.environ.get('INSTAGRAM_2FA_CODE', '123456')
 
 logger.info(f"Username set: {'Yes' if USERNAME else 'No'}")
 logger.info(f"Password set: {'Yes' if PASSWORD else 'No'}")
@@ -41,25 +41,471 @@ login_status = {
 # Create screenshots directory
 os.makedirs('screenshots', exist_ok=True)
 
-@app.route('/')
-def home():
-    return jsonify({
-        "status": "online",
-        "service": "Instagram Login Bot",
-        "endpoints": {
-            "/login": "POST - Start login process",
-            "/status": "GET - Check login status",
-            "/result": "GET - Get login result",
-            "/screenshots": "GET - Get all screenshots",
-            "/health": "GET - Health check"
+# HTML UI template
+UI_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Instagram Login Bot - Screenshot Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
         }
-    })
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+            font-weight: 300;
+        }
+        .controls {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .btn {
+            padding: 10px 25px;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-weight: 500;
+        }
+        .btn-primary {
+            background: #0095f6;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #0077cc;
+        }
+        .btn-danger {
+            background: #ed4956;
+            color: white;
+        }
+        .btn-danger:hover {
+            background: #c43a46;
+        }
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+        .btn-success:hover {
+            background: #218838;
+        }
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .status {
+            padding: 10px 20px;
+            border-radius: 5px;
+            font-weight: 500;
+            margin-left: auto;
+        }
+        .status-idle {
+            background: #e9ecef;
+            color: #495057;
+        }
+        .status-running {
+            background: #fff3cd;
+            color: #856404;
+            animation: pulse 1s infinite;
+        }
+        .status-success {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status-error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+        .screenshot-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .screenshot-item {
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            transition: transform 0.3s;
+        }
+        .screenshot-item:hover {
+            transform: translateY(-5px);
+        }
+        .screenshot-item img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .screenshot-item .info {
+            padding: 15px;
+        }
+        .screenshot-item .info .name {
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 5px;
+        }
+        .screenshot-item .info .time {
+            font-size: 12px;
+            color: #999;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 80px 20px;
+            color: #999;
+        }
+        .empty-state svg {
+            font-size: 60px;
+            margin-bottom: 20px;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        .log-container {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .log-container .log-entry {
+            padding: 2px 0;
+        }
+        .log-container .log-entry .time {
+            color: #569cd6;
+            margin-right: 10px;
+        }
+        .log-container .log-entry .level-info {
+            color: #4ec9b0;
+        }
+        .log-container .log-entry .level-error {
+            color: #f44747;
+        }
+        .log-container .log-entry .level-warning {
+            color: #dcdcaa;
+        }
+        .refresh-btn {
+            background: #0095f6;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .refresh-btn:hover {
+            background: #0077cc;
+        }
+        .controls-left {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+        .auto-refresh {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #666;
+            font-size: 14px;
+        }
+        .auto-refresh input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+        @media (max-width: 600px) {
+            .screenshot-grid {
+                grid-template-columns: 1fr;
+            }
+            .controls {
+                flex-direction: column;
+            }
+            .status {
+                margin-left: 0;
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📸 Instagram Login Bot - Screenshot Viewer</h1>
+        
+        <div class="controls">
+            <div class="controls-left">
+                <button class="btn btn-primary" onclick="startLogin()" id="loginBtn">🚀 Start Login</button>
+                <button class="btn btn-secondary" onclick="refreshScreenshots()">🔄 Refresh</button>
+                <button class="btn btn-danger" onclick="clearScreenshots()">🗑️ Clear All</button>
+            </div>
+            <div class="auto-refresh">
+                <input type="checkbox" id="autoRefresh" checked onchange="toggleAutoRefresh()">
+                <label for="autoRefresh">Auto-refresh (5s)</label>
+            </div>
+            <div id="status" class="status status-idle">⏸ Idle</div>
+        </div>
+        
+        <div id="logContainer" class="log-container"></div>
+        
+        <div id="screenshotGrid" class="screenshot-grid">
+            <div class="loading">Loading screenshots...</div>
+        </div>
+    </div>
+
+    <script>
+        let autoRefreshInterval = null;
+        let isRefreshing = false;
+        
+        function toggleAutoRefresh() {
+            const checked = document.getElementById('autoRefresh').checked;
+            if (checked) {
+                startAutoRefresh();
+            } else {
+                stopAutoRefresh();
+            }
+        }
+        
+        function startAutoRefresh() {
+            if (autoRefreshInterval) return;
+            autoRefreshInterval = setInterval(() => {
+                if (!document.hidden) {
+                    refreshScreenshots();
+                }
+            }, 5000);
+        }
+        
+        function stopAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+        }
+        
+        async function startLogin() {
+            const btn = document.getElementById('loginBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ Starting...';
+            
+            try {
+                const response = await fetch('/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        username: '{{ username }}',
+                        password: '{{ password }}',
+                        two_fa_code: '{{ two_fa_code }}'
+                    })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    updateStatus('running', '🔄 Login in progress...');
+                    addLog('Login started successfully');
+                } else {
+                    updateStatus('error', '❌ Failed to start: ' + data.message);
+                    addLog('Error: ' + data.message, 'error');
+                }
+            } catch (error) {
+                updateStatus('error', '❌ Error: ' + error.message);
+                addLog('Error: ' + error.message, 'error');
+            }
+            
+            btn.disabled = false;
+            btn.textContent = '🚀 Start Login';
+            refreshScreenshots();
+        }
+        
+        async function refreshScreenshots() {
+            if (isRefreshing) return;
+            isRefreshing = true;
+            
+            try {
+                const response = await fetch('/screenshots');
+                const data = await response.json();
+                renderScreenshots(data.screenshots);
+                
+                // Update status
+                const statusResponse = await fetch('/status');
+                const statusData = await statusResponse.json();
+                if (statusData.login_status.in_progress) {
+                    updateStatus('running', '🔄 Login in progress...');
+                } else if (statusData.login_status.completed) {
+                    const result = await fetch('/result');
+                    const resultData = await result.json();
+                    if (resultData.success) {
+                        updateStatus('success', '✅ Login successful!');
+                        addLog('✅ Login completed successfully!');
+                    } else {
+                        updateStatus('error', '❌ Login failed');
+                        addLog('❌ Login failed', 'error');
+                    }
+                } else {
+                    updateStatus('idle', '⏸ Idle');
+                }
+            } catch (error) {
+                console.error('Error refreshing:', error);
+            }
+            
+            isRefreshing = false;
+        }
+        
+        function renderScreenshots(screenshots) {
+            const grid = document.getElementById('screenshotGrid');
+            
+            if (!screenshots || screenshots.length === 0) {
+                grid.innerHTML = `
+                    <div class="empty-state" style="grid-column: 1/-1;">
+                        <div style="font-size: 60px; margin-bottom: 20px;">📷</div>
+                        <h3>No screenshots yet</h3>
+                        <p>Click "Start Login" to begin capturing screenshots</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            // Sort by name (which includes timestamp)
+            const sorted = [...screenshots].reverse();
+            
+            grid.innerHTML = sorted.map(item => `
+                <div class="screenshot-item">
+                    <img src="${item.data}" alt="${item.name}" loading="lazy">
+                    <div class="info">
+                        <div class="name">${item.name.replace('.png', '').replace('_', ' - ')}</div>
+                        <div class="time">${new Date().toLocaleString()}</div>
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        function updateStatus(type, message) {
+            const statusEl = document.getElementById('status');
+            statusEl.className = `status status-${type}`;
+            statusEl.textContent = message;
+        }
+        
+        function addLog(message, level = 'info') {
+            const container = document.getElementById('logContainer');
+            const time = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `
+                <span class="time">[${time}]</span>
+                <span class="level-${level}">${message}</span>
+            `;
+            container.appendChild(entry);
+            container.scrollTop = container.scrollHeight;
+            
+            // Keep only last 100 entries
+            while (container.children.length > 100) {
+                container.removeChild(container.firstChild);
+            }
+        }
+        
+        async function clearScreenshots() {
+            if (!confirm('Delete all screenshots?')) return;
+            
+            try {
+                const response = await fetch('/clear_screenshots', { method: 'POST' });
+                if (response.ok) {
+                    document.getElementById('screenshotGrid').innerHTML = `
+                        <div class="empty-state" style="grid-column: 1/-1;">
+                            <div style="font-size: 60px; margin-bottom: 20px;">🗑️</div>
+                            <h3>Screenshots cleared</h3>
+                        </div>
+                    `;
+                    addLog('Screenshots cleared');
+                }
+            } catch (error) {
+                console.error('Error clearing screenshots:', error);
+            }
+        }
+        
+        // Initialize
+        startAutoRefresh();
+        refreshScreenshots();
+        
+        // Refresh when page becomes visible
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                refreshScreenshots();
+            }
+        });
+        
+        // Add some initial logs
+        addLog('Screenshot Viewer started');
+        addLog('Click "Start Login" to begin the login process');
+    </script>
+</body>
+</html>
+'''
+
+@app.route('/')
+def index():
+    """Serve the UI page"""
+    return render_template_string(
+        UI_TEMPLATE,
+        username=USERNAME,
+        password=PASSWORD,
+        two_fa_code=TWO_FA_CODE
+    )
+
+@app.route('/clear_screenshots', methods=['POST'])
+def clear_screenshots():
+    """Clear all screenshots"""
+    try:
+        for f in os.listdir('screenshots'):
+            try:
+                os.remove(os.path.join('screenshots', f))
+            except:
+                pass
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/screenshots')
 def get_screenshots():
     """Get all screenshots taken during login"""
     screenshots = []
-    for filename in os.listdir('screenshots'):
+    for filename in sorted(os.listdir('screenshots')):
         if filename.endswith('.png'):
             try:
                 with open(f'screenshots/{filename}', 'rb') as f:
@@ -70,23 +516,8 @@ def get_screenshots():
                     })
             except:
                 pass
-    
-    # Also return HTML content for debugging
-    html_files = []
-    for filename in os.listdir('screenshots'):
-        if filename.endswith('.html'):
-            try:
-                with open(f'screenshots/{filename}', 'r', encoding='utf-8') as f:
-                    html_files.append({
-                        "name": filename,
-                        "content": f.read()[:1000]  # First 1000 chars
-                    })
-            except:
-                pass
-    
     return jsonify({
         "screenshots": screenshots,
-        "html_files": html_files,
         "count": len(screenshots)
     })
 
@@ -123,26 +554,20 @@ def health():
         "timestamp": datetime.now().isoformat()
     })
 
-@app.route('/login', methods=['GET', 'POST'])
+@app.route('/login', methods=['POST'])
 def login():
     global login_status
     
     if login_status["in_progress"]:
         return jsonify({
             "success": False,
-            "message": "Login already in progress",
-            "status": "in_progress"
+            "message": "Login already in progress"
         })
     
-    username = USERNAME
-    password = PASSWORD
-    two_fa_code = TWO_FA_CODE
-    
-    if request.method == 'POST':
-        data = request.json or {}
-        username = data.get('username', USERNAME)
-        password = data.get('password', PASSWORD)
-        two_fa_code = data.get('two_fa_code', TWO_FA_CODE)
+    data = request.json or {}
+    username = data.get('username', USERNAME)
+    password = data.get('password', PASSWORD)
+    two_fa_code = data.get('two_fa_code', TWO_FA_CODE)
     
     if not username or not password:
         return jsonify({
@@ -174,11 +599,7 @@ def login():
     
     return jsonify({
         "success": True,
-        "message": "Login started in background",
-        "status": "in_progress",
-        "check_status": "/status",
-        "get_result": "/result",
-        "get_screenshots": "/screenshots"
+        "message": "Login started in background"
     })
 
 def run_login_background(username, password, two_fa_code):
@@ -191,7 +612,7 @@ def run_login_background(username, password, two_fa_code):
         asyncio.set_event_loop(loop)
         
         result = loop.run_until_complete(
-            perform_login_headless(username, password, two_fa_code)
+            perform_login_with_screenshots(username, password, two_fa_code)
         )
         
         login_status["completed"] = True
@@ -222,38 +643,19 @@ async def take_screenshot(page, name):
         logger.error(f"Failed to take screenshot {name}: {str(e)}")
         return None
 
-async def save_html(page, name):
-    """Save HTML content for debugging"""
-    try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"screenshots/{timestamp}_{name}.html"
-        html = await page.content()
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(html)
-        logger.info(f"📄 HTML saved: {filename}")
-        return filename
-    except Exception as e:
-        logger.error(f"Failed to save HTML {name}: {str(e)}")
-        return None
-
-async def perform_login_headless(username, password, two_fa_code):
-    """Perform Instagram login in headless mode with screenshots"""
+async def perform_login_with_screenshots(username, password, two_fa_code):
+    """Perform Instagram login with screenshots at every step"""
     
     try:
         async with async_playwright() as p:
-            # Use headless=True for Render
             browser = await p.chromium.launch(
-                headless=True,  # Must be True on Render
+                headless=True,
                 args=[
                     '--disable-blink-features=AutomationControlled',
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
-                    '--disable-software-rasterizer',
-                    '--disable-extensions',
-                    '--disable-setuid-sandbox',
-                    '--no-first-run',
-                    '--no-default-browser-check'
+                    '--disable-software-rasterizer'
                 ]
             )
             
@@ -267,70 +669,56 @@ async def perform_login_headless(username, password, two_fa_code):
             try:
                 # Step 1: Go to Instagram
                 logger.info("📸 Step 1: Navigating to Instagram...")
-                await page.goto("https://www.instagram.com/", wait_until="networkidle", timeout=60000)
+                await page.goto("https://www.instagram.com/accounts/login/", wait_until="networkidle")
                 await asyncio.sleep(3)
-                await take_screenshot(page, "01_instagram_home")
-                await save_html(page, "01_instagram_home")
+                await take_screenshot(page, "01_login_page")
                 
-                current_url = page.url
-                logger.info(f"Current URL: {current_url}")
-                
-                # Step 2: If not on login page, go to login
-                if "login" not in current_url:
-                    logger.info("📸 Step 2: Going to login page...")
-                    await page.goto("https://www.instagram.com/accounts/login/", timeout=60000)
-                    await asyncio.sleep(3)
-                    await take_screenshot(page, "02_login_page")
-                    await save_html(page, "02_login_page")
-                else:
-                    await take_screenshot(page, "02_already_on_login")
-                    await save_html(page, "02_already_on_login")
-                
-                # Step 3: Check for cookie consent
-                logger.info("📸 Step 3: Checking for cookie consent...")
+                # Step 2: Check for cookie consent
+                logger.info("📸 Step 2: Looking for cookie consent...")
                 try:
                     cookie_button = await page.query_selector('button:has-text("Accept")')
                     if cookie_button:
                         await cookie_button.click()
                         await asyncio.sleep(1)
-                        await take_screenshot(page, "03_cookies_accepted")
+                        await take_screenshot(page, "02_cookies_accepted")
                         logger.info("✅ Accepted cookies")
                 except:
                     logger.info("No cookie consent needed")
-                    await take_screenshot(page, "03_no_cookies")
+                    await take_screenshot(page, "02_no_cookies")
                 
-                # Step 4: Find username field
-                logger.info("📸 Step 4: Looking for username field...")
+                # Step 3: Find username field
+                logger.info("📸 Step 3: Looking for username field...")
                 username_field = None
                 
+                # Try multiple selectors for Instagram login
                 selectors = [
-                    'input[name="email"]',
-                    'input[type="text"]',
+                    'input[name="username"]',
+                    'input[type="text"][name="username"]',
                     'input[autocomplete="username"]',
-                    'input[placeholder*="Phone"]',
-                    'input[placeholder*="Username"]',
-                    'input[placeholder*="Email"]'
+                    'input[placeholder*="username"]',
+                    'input[placeholder*="phone"]',
+                    'input[placeholder*="email"]',
+                    'input[type="text"]:not([hidden])'
                 ]
                 
                 for selector in selectors:
                     try:
                         logger.info(f"Trying selector: {selector}")
-                        username_field = await page.wait_for_selector(selector, timeout=5000)
+                        username_field = await page.wait_for_selector(selector, timeout=3000)
                         if username_field:
                             logger.info(f"✅ Found username field with: {selector}")
-                            await take_screenshot(page, "04_username_field_found")
+                            await take_screenshot(page, "03_username_field_found")
                             break
                     except:
                         pass
                 
                 if not username_field:
-                    await take_screenshot(page, "04_username_field_not_found")
-                    await save_html(page, "04_username_field_not_found")
+                    await take_screenshot(page, "03_username_field_not_found")
                     logger.error("❌ Could not find username field!")
                     return {"success": False, "error": "Could not find username field"}
                 
-                # Step 5: Fill username
-                logger.info("📸 Step 5: Filling username...")
+                # Step 4: Fill username
+                logger.info("📸 Step 4: Filling username...")
                 await username_field.click()
                 await asyncio.sleep(1)
                 await username_field.fill("")
@@ -341,11 +729,11 @@ async def perform_login_headless(username, password, two_fa_code):
                     await asyncio.sleep(random.uniform(0.02, 0.08))
                 
                 await asyncio.sleep(2)
-                await take_screenshot(page, "05_username_filled")
+                await take_screenshot(page, "04_username_filled")
                 logger.info(f"✅ Username filled: {username}")
                 
-                # Step 6: Find password field
-                logger.info("📸 Step 6: Looking for password field...")
+                # Step 5: Find password field
+                logger.info("📸 Step 5: Looking for password field...")
                 password_field = None
                 
                 selectors = [
@@ -357,22 +745,21 @@ async def perform_login_headless(username, password, two_fa_code):
                 for selector in selectors:
                     try:
                         logger.info(f"Trying selector: {selector}")
-                        password_field = await page.wait_for_selector(selector, timeout=5000)
+                        password_field = await page.wait_for_selector(selector, timeout=3000)
                         if password_field:
                             logger.info(f"✅ Found password field with: {selector}")
-                            await take_screenshot(page, "06_password_field_found")
+                            await take_screenshot(page, "05_password_field_found")
                             break
                     except:
                         pass
                 
                 if not password_field:
-                    await take_screenshot(page, "06_password_field_not_found")
-                    await save_html(page, "06_password_field_not_found")
+                    await take_screenshot(page, "05_password_field_not_found")
                     logger.error("❌ Could not find password field!")
                     return {"success": False, "error": "Could not find password field"}
                 
-                # Step 7: Fill password
-                logger.info("📸 Step 7: Filling password...")
+                # Step 6: Fill password
+                logger.info("📸 Step 6: Filling password...")
                 await password_field.click()
                 await asyncio.sleep(1)
                 await password_field.fill("")
@@ -383,47 +770,50 @@ async def perform_login_headless(username, password, two_fa_code):
                     await asyncio.sleep(random.uniform(0.02, 0.08))
                 
                 await asyncio.sleep(2)
-                await take_screenshot(page, "07_password_filled")
+                await take_screenshot(page, "06_password_filled")
                 logger.info("✅ Password filled")
                 
-                # Step 8: Submit login
-                logger.info("📸 Step 8: Submitting login...")
-                await page.keyboard.press("Enter")
-                await asyncio.sleep(5)
-                await take_screenshot(page, "08_after_submit")
-                await save_html(page, "08_after_submit")
-                logger.info("✅ Login submitted")
+                # Step 7: Submit login
+                logger.info("📸 Step 7: Submitting login...")
+                # Try to find login button first
+                login_button = await page.query_selector('button[type="submit"]')
+                if login_button:
+                    await login_button.click()
+                    logger.info("✅ Clicked login button")
+                else:
+                    await page.keyboard.press("Enter")
+                    logger.info("✅ Pressed Enter")
                 
-                # Step 9: Wait for response
-                logger.info("📸 Step 9: Waiting for response...")
-                for i in range(15):
+                await asyncio.sleep(5)
+                await take_screenshot(page, "07_after_submit")
+                
+                # Step 8: Wait for response
+                logger.info("📸 Step 8: Waiting for response...")
+                for i in range(10):
                     await asyncio.sleep(2)
                     current_url = page.url
                     logger.info(f"Check {i+1}: URL: {current_url}")
                     
                     if "two_step_verification" in current_url:
                         logger.info("🔐 2FA page detected!")
-                        await take_screenshot(page, f"09_2fa_detected")
-                        await save_html(page, f"09_2fa_detected")
+                        await take_screenshot(page, f"08_2fa_detected")
                         break
                     elif "login" not in current_url and "instagram.com" in current_url:
                         logger.info("✅ Navigated away from login!")
-                        await take_screenshot(page, f"09_logged_in")
+                        await take_screenshot(page, f"08_logged_in")
                         break
                     
-                    if i % 3 == 0:  # Take screenshot every few seconds
-                        await take_screenshot(page, f"09_waiting_{i+1}")
+                    if i % 3 == 0:
+                        await take_screenshot(page, f"08_waiting_{i+1}")
                 
                 current_url = page.url
                 logger.info(f"URL after waiting: {current_url}")
-                await take_screenshot(page, "09_final_url")
-                await save_html(page, "09_final_url")
+                await take_screenshot(page, "08_final_url")
                 
-                # Step 10: Handle 2FA if needed
+                # Step 9: Handle 2FA if needed
                 if "two_step_verification" in current_url or "challenge" in current_url:
-                    logger.info("📸 Step 10: Processing 2FA...")
-                    await take_screenshot(page, "10_2fa_page")
-                    await save_html(page, "10_2fa_page")
+                    logger.info("📸 Step 9: Processing 2FA...")
+                    await take_screenshot(page, "09_2fa_page")
                     
                     twofa_field = None
                     try:
@@ -457,30 +847,23 @@ async def perform_login_headless(username, password, two_fa_code):
                             await asyncio.sleep(random.uniform(0.02, 0.08))
                         
                         await asyncio.sleep(2)
-                        await take_screenshot(page, "10_2fa_filled")
+                        await take_screenshot(page, "09_2fa_filled")
                         
                         logger.info("Pressing Enter to submit 2FA...")
                         await page.keyboard.press("Enter")
                         await asyncio.sleep(5)
-                        await take_screenshot(page, "10_2fa_submitted")
-                        await save_html(page, "10_2fa_submitted")
-                    else:
-                        logger.warning("⚠️ 2FA field not found or no code provided")
-                        await take_screenshot(page, "10_2fa_field_not_found")
-                        await save_html(page, "10_2fa_field_not_found")
+                        await take_screenshot(page, "09_2fa_submitted")
                 
-                # Step 11: Final check
-                logger.info("📸 Step 11: Final check...")
+                # Step 10: Final check
+                logger.info("📸 Step 10: Final check...")
                 await asyncio.sleep(3)
                 final_url = page.url
-                await take_screenshot(page, "11_final_page")
-                await save_html(page, "11_final_page")
+                await take_screenshot(page, "10_final_page")
                 
                 if "login" not in final_url and "challenge" not in final_url and "two_step" not in final_url:
                     cookies = await context.cookies()
                     logger.info("🎉 Login successful!")
-                    await take_screenshot(page, "12_success")
-                    await save_html(page, "12_success")
+                    await take_screenshot(page, "11_success")
                     return {
                         "success": True,
                         "cookies": cookies,
@@ -488,8 +871,7 @@ async def perform_login_headless(username, password, two_fa_code):
                     }
                 else:
                     logger.error(f"❌ Login failed. URL: {final_url}")
-                    await take_screenshot(page, "12_failed")
-                    await save_html(page, "12_failed")
+                    await take_screenshot(page, "11_failed")
                     return {
                         "success": False,
                         "error": f"Login failed. URL: {final_url}",
@@ -499,7 +881,6 @@ async def perform_login_headless(username, password, two_fa_code):
             except Exception as e:
                 logger.error(f"Login error: {str(e)}")
                 await take_screenshot(page, "error")
-                await save_html(page, "error")
                 return {"success": False, "error": str(e)}
             finally:
                 await browser.close()
