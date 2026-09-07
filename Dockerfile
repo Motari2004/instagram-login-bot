@@ -8,7 +8,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PORT=5000
 
-# Install only essential dependencies
+# Install essential dependencies
 RUN apt-get update && apt-get install -y \
     curl \
     libnss3 \
@@ -21,18 +21,17 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements
+# Copy and install Python dependencies
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright and Chromium
+# Install Playwright
 RUN playwright install chromium
 
 # Copy application
-COPY . .
+COPY app.py .
 
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+# Simple command to run
+CMD ["python", "app.py"]
