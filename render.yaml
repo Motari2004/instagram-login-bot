@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: instagram-login-bot
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: INSTAGRAM_USERNAME
+        value: your_username_here
+      - key: INSTAGRAM_PASSWORD
+        value: your_password_here
+      - key: INSTAGRAM_2FA_CODE
+        value: your_2fa_code_here
+      - key: PYTHON_VERSION
+        value: 3.11.0
